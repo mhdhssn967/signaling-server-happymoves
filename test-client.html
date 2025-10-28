@@ -10,7 +10,7 @@
     <p>Status: <span id="status">Disconnected</span></p>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script>
-      const socket = io("http://localhost:8080"); // change to your Render URL later
+      const socket = io("https://signaling-server-happymoves.onrender.com"); // change to your Render URL later
       const status = document.getElementById("status");
 
       socket.on("connect", () => {

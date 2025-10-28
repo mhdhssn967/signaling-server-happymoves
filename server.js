@@ -76,24 +76,53 @@ import http from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 
-// const PORT = process.env.PORT || 8080;
 const SIGNALING_SECRET = process.env.SIGNALING_SECRET || null;
 
 const app = express();
-app.use(cors());
-app.get("/", (req, res) => res.send("WebRTC Signaling Server is running"));
+
+// ✅ Allowed client origins (add more as needed)
+const allowedOrigins = [
+  "https://clinquant-praline-1faed4.netlify.app",
+  "https://stunning-pastelito-bda24e.netlify.app",
+  "https://oqulix.com",
+  "https://your-production-site.com",
+];
+
+// ✅ CORS setup for Express routes
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin) || origin.endsWith("netlify.app")) {
+      callback(null, true);
+    } else {
+      console.warn(`❌ Blocked CORS request from: ${origin}`);
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  methods: ["GET", "POST"],
+  credentials: true
+}));
+
+app.get("/", (req, res) => res.send("✅ WebRTC Signaling Server is running"));
 
 const server = http.createServer(app);
+
+// ✅ CORS setup for Socket.IO
 const io = new Server(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin) || origin.endsWith("netlify.app")) {
+        callback(null, true);
+      } else {
+        console.warn(`❌ Blocked socket connection from: ${origin}`);
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    methods: ["GET", "POST"]
   },
   pingTimeout: 30000,
 });
 
-// Simple in-memory room participant tracking (socket ids)
-// { roomId: Set(socketId) }
+// In-memory room tracking
 const rooms = new Map();
 
 function joinRoom(roomId, socketId) {
@@ -108,26 +137,22 @@ function leaveRoom(roomId, socketId) {
 }
 
 io.on("connection", (socket) => {
-  console.log("socket connected:", socket.id);
+  console.log("🟢 socket connected:", socket.id);
 
-  // Client should emit 'join' with { roomId, secret? }
   socket.on("join", (data) => {
     try {
       const { roomId, secret } = data || {};
       if (!roomId) return socket.emit("error", { message: "roomId required" });
       if (SIGNALING_SECRET && secret !== SIGNALING_SECRET) {
-        console.log("rejected join due to wrong secret", socket.id);
+        console.log("🔴 rejected join due to wrong secret", socket.id);
         return socket.emit("error", { message: "invalid secret" });
       }
 
       socket.join(roomId);
       joinRoom(roomId, socket.id);
-      console.log(`socket ${socket.id} joined room ${roomId}`);
+      console.log(`🟢 socket ${socket.id} joined room ${roomId}`);
 
-      // Inform other clients in room
       socket.to(roomId).emit("peer-joined", { socketId: socket.id });
-
-      // Send current participants back to the joiner
       const participants = Array.from(rooms.get(roomId) || []).filter(id => id !== socket.id);
       socket.emit("joined", { roomId, participants });
     } catch (err) {
@@ -136,44 +161,25 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Offer: { roomId, sdp, toSocketId? }
-  socket.on("offer", (payload) => {
-    const { roomId, sdp, toSocketId } = payload || {};
+  socket.on("offer", ({ roomId, sdp, toSocketId }) => {
     if (!roomId || !sdp) return;
-    // If a specific target was provided, send only to that socket
-    if (toSocketId) {
-      io.to(toSocketId).emit("offer", { from: socket.id, sdp });
-    } else {
-      // Broadcast to others in the room
-      socket.to(roomId).emit("offer", { from: socket.id, sdp });
-    }
+    if (toSocketId) io.to(toSocketId).emit("offer", { from: socket.id, sdp });
+    else socket.to(roomId).emit("offer", { from: socket.id, sdp });
   });
 
-  // Answer: { roomId, sdp, toSocketId? }
-  socket.on("answer", (payload) => {
-    const { roomId, sdp, toSocketId } = payload || {};
+  socket.on("answer", ({ roomId, sdp, toSocketId }) => {
     if (!roomId || !sdp) return;
-    if (toSocketId) {
-      io.to(toSocketId).emit("answer", { from: socket.id, sdp });
-    } else {
-      socket.to(roomId).emit("answer", { from: socket.id, sdp });
-    }
+    if (toSocketId) io.to(toSocketId).emit("answer", { from: socket.id, sdp });
+    else socket.to(roomId).emit("answer", { from: socket.id, sdp });
   });
 
-  // Ice candidate: { roomId, candidate, toSocketId? }
-  socket.on("ice-candidate", (payload) => {
-    const { roomId, candidate, toSocketId } = payload || {};
+  socket.on("ice-candidate", ({ roomId, candidate, toSocketId }) => {
     if (!roomId || !candidate) return;
-    if (toSocketId) {
-      io.to(toSocketId).emit("ice-candidate", { from: socket.id, candidate });
-    } else {
-      socket.to(roomId).emit("ice-candidate", { from: socket.id, candidate });
-    }
+    if (toSocketId) io.to(toSocketId).emit("ice-candidate", { from: socket.id, candidate });
+    else socket.to(roomId).emit("ice-candidate", { from: socket.id, candidate });
   });
 
-  // Leave / disconnect handling
-  socket.on("leave", (data) => {
-    const { roomId } = data || {};
+  socket.on("leave", ({ roomId }) => {
     if (roomId) {
       leaveRoom(roomId, socket.id);
       socket.leave(roomId);
@@ -182,8 +188,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", (reason) => {
-    console.log("socket disconnected", socket.id, reason);
-    // Clean up from all rooms
+    console.log("🔌 socket disconnected", socket.id, reason);
     for (const [roomId, set] of rooms.entries()) {
       if (set.has(socket.id)) {
         leaveRoom(roomId, socket.id);
@@ -193,13 +198,13 @@ io.on("connection", (socket) => {
   });
 
   socket.on("error", (err) => {
-    console.error("socket error", err);
+    console.error("⚠️ socket error", err);
   });
 });
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-  console.log(`Signaling server listening on port ${PORT}`);
+  console.log(`🚀 Signaling server listening on port ${PORT}`);
 });
 
 

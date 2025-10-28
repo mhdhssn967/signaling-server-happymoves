@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebRTC Signaling Test</title>
+  </head>
+  <body>
+    <h2>WebRTC Signaling Test</h2>
+    <p>Status: <span id="status">Disconnected</span></p>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+      const socket = io("http://localhost:8080"); // change to your Render URL later
+      const status = document.getElementById("status");
+
+      socket.on("connect", () => {
+        status.textContent = "Connected ✅";
+        console.log("Connected to signaling server");
+        socket.emit("join", "test-room"); // join a test room
+      });
+
+      socket.on("joined", (roomId) => {
+        console.log("Joined room:", roomId);
+      });
+
+      socket.on("disconnect", () => {
+        status.textContent = "Disconnected ❌";
+      });
+
+      // Simulate offer/answer exchange for testing
+      socket.emit("offer", { roomId: "test-room", sdp: "fake-offer-sdp" });
+
+      socket.on("offer", (data) => {
+        console.log("Received offer:", data);
+      });
+
+      socket.on("answer", (data) => {
+        console.log("Received answer:", data);
+      });
+
+      socket.on("ice-candidate", (data) => {
+        console.log("Received ICE candidate:", data);
+      });
+    </script>
+  </body>
+</html>

@@ -85,7 +85,7 @@ const allowedOrigins = [
   "https://clinquant-praline-1faed4.netlify.app",
   "https://stunning-pastelito-bda24e.netlify.app",
   "https://oqulix.com",
-  "https:ws-receiver-96na.vercel.app",
+  "https://ws-receiver-96na.vercel.app",
   "http://127.0.0.1:5500",'http://127.0.0.1:5501',
   'https://ws-receiver.vercel.app'
 ];

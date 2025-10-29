@@ -86,7 +86,7 @@ const allowedOrigins = [
   "https://stunning-pastelito-bda24e.netlify.app",
   "https://oqulix.com",
   "https://your-production-site.com",
-  "http://127.0.0.1:5500"
+  "http://127.0.0.1:5500",'http://127.0.0.1:5501'
 ];
 
 // ✅ CORS setup for Express routes

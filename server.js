@@ -184,29 +184,35 @@ wss.on("connection", (ws, req) => {
         }
 
         case "offer":
-        case "answer":
-        case "ice-candidate": {
-          if (!client.roomId) return;
+case "answer":
+case "ice-candidate": {
+  // 🧠 Use client.roomId OR fallback to msg.to/msg.room
+  const targetRoom = client.roomId || msg.to || msg.room;
+  if (!targetRoom) {
+    console.warn(`[WS] ${eventType} missing roomId from ${client.id}`);
+    return;
+  }
 
-          let finalPayload = payload;
+  let finalPayload = payload;
 
-          // Normalize Unity ICE payload
-          if (eventType === "ice-candidate") {
-            const candidateObj =
-              msg.payload?.candidate?.candidate || msg.payload?.candidate;
-            const sdpMid =
-              msg.payload?.candidate?.sdpMid || msg.payload?.sdpMid;
-            const sdpMLineIndex =
-              msg.payload?.candidate?.sdpMLineIndex || msg.payload?.sdpMLineIndex;
+  // Normalize Unity ICE payload
+  if (eventType === "ice-candidate") {
+    const candidateObj =
+      msg.payload?.candidate?.candidate || msg.payload?.candidate;
+    const sdpMid =
+      msg.payload?.candidate?.sdpMid || msg.payload?.sdpMid;
+    const sdpMLineIndex =
+      msg.payload?.candidate?.sdpMLineIndex || msg.payload?.sdpMLineIndex;
 
-            if (candidateObj) {
-              finalPayload = { candidate: candidateObj, sdpMid, sdpMLineIndex };
-            }
-          }
+    if (candidateObj) {
+      finalPayload = { candidate: candidateObj, sdpMid, sdpMLineIndex };
+    }
+  }
 
-          broadcast(client.id, client.roomId, eventType, finalPayload, toSocketId);
-          break;
-        }
+  broadcast(client.id, targetRoom, eventType, finalPayload, toSocketId);
+  break;
+}
+
 
         case "leave":
           cleanupClient(client.id, client.roomId);

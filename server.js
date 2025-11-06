@@ -73,24 +73,23 @@ server.js
 
 import express from "express";
 import http from "http";
-import { Server } from "socket.io";
+import { WebSocketServer } from "ws";
 import cors from "cors";
 
 const SIGNALING_SECRET = process.env.SIGNALING_SECRET || null;
+const PORT = process.env.PORT || 8080;
 
 const app = express();
 
-// ✅ Allowed client origins (add more as needed)
+// --- CORS Config ---
 const allowedOrigins = [
-  "https://clinquant-praline-1faed4.netlify.app",
-  "https://stunning-pastelito-bda24e.netlify.app",
   "https://oqulix.com",
   "https://ws-receiver-96na.vercel.app",
-  "http://127.0.0.1:5500",'http://127.0.0.1:5501',
-  'https://ws-receiver.vercel.app'
+  "https://ws-receiver.vercel.app",
+  "http://127.0.0.1:5500",
+  "http://127.0.0.1:5501",
 ];
 
-// ✅ CORS setup for Express routes
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin) || origin.endsWith("netlify.app")) {
@@ -100,116 +99,133 @@ app.use(cors({
       callback(new Error("Not allowed by CORS"));
     }
   },
-  methods: ["GET", "POST"],
-  credentials: true
 }));
 
-app.get("/", (req, res) => res.send("✅ WebRTC Signaling Server is running"));
+app.get("/", (req, res) => res.send("✅ WebRTC Signaling Server (Unity-compatible) is running."));
 
 const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
-// ✅ CORS setup for Socket.IO
-const io = new Server(server, {
-  cors: {
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin) || origin.endsWith("netlify.app")) {
-        callback(null, true);
-      } else {
-        console.warn(`❌ Blocked socket connection from: ${origin}`);
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
-    methods: ["GET", "POST"]
-  },
-  pingTimeout: 30000,
-});
+// --- In-memory tracking ---
+const clients = new Map(); // ws → { id, roomId, isUnity }
+const rooms = new Map();   // roomId → Set(socketIds)
 
-// In-memory room tracking
-const rooms = new Map();
-
-function joinRoom(roomId, socketId) {
-  if (!rooms.has(roomId)) rooms.set(roomId, new Set());
-  rooms.get(roomId).add(socketId);
+// --- Utility: send message to one client ---
+function sendToClient(ws, type, payload) {
+  if (ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify({ type, payload }));
+  }
 }
-function leaveRoom(roomId, socketId) {
+
+// --- Utility: broadcast message to room ---
+function broadcast(senderId, roomId, type, payload, toSocketId) {
   if (!rooms.has(roomId)) return;
-  const s = rooms.get(roomId);
-  s.delete(socketId);
-  if (s.size === 0) rooms.delete(roomId);
+  wss.clients.forEach(ws => {
+    const info = clients.get(ws);
+    if (!info || info.roomId !== roomId || ws.readyState !== ws.OPEN) return;
+
+    if (toSocketId) {
+      if (info.id === toSocketId) sendToClient(ws, type, { from: senderId, ...payload });
+    } else if (info.id !== senderId) {
+      sendToClient(ws, type, { from: senderId, ...payload });
+    }
+  });
 }
 
-io.on("connection", (socket) => {
-  console.log("🟢 socket connected:", socket.id);
+// --- Cleanup ---
+function cleanupClient(socketId, roomId) {
+  const targetRoom = roomId || Array.from(rooms.keys()).find(r => rooms.get(r).has(socketId));
+  if (!targetRoom || !rooms.has(targetRoom)) return;
 
-  socket.on("join", (data) => {
+  const peers = rooms.get(targetRoom);
+  peers.delete(socketId);
+  console.log(`[WS] Client ${socketId} left room ${targetRoom}. Remaining: ${peers.size}`);
+
+  if (peers.size > 0) broadcast(socketId, targetRoom, "peer-left", { socketId });
+  else rooms.delete(targetRoom);
+}
+
+// --- WebSocket Connections ---
+wss.on("connection", (ws, req) => {
+  const socketId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const userAgent = req.headers["user-agent"] || "";
+  const isUnity = /unity|csharp|mono/i.test(userAgent);
+
+  clients.set(ws, { id: socketId, roomId: null, isUnity });
+
+  console.log(`🟢 [${isUnity ? "Unity" : "Web"}] Connected: ${socketId} (${wss.clients.size} total)`);
+
+  ws.on("message", (data) => {
     try {
-      console.log("trying from unity");
-      
-      const { roomId, secret } = data || {};
-      if (!roomId) return socket.emit("error", { message: "roomId required" });
-      if (SIGNALING_SECRET && secret !== SIGNALING_SECRET) {
-        console.log("🔴 rejected join due to wrong secret", socket.id);
-        return socket.emit("error", { message: "invalid secret" });
+      const msg = JSON.parse(data.toString());
+      const client = clients.get(ws);
+      if (!msg.type) return;
+
+      // Normalize Unity event naming
+      const eventType = (msg.type === "ice") ? "ice-candidate" : msg.type;
+      const { roomId, toSocketId, ...payload } = msg;
+
+      switch (eventType) {
+        case "join": {
+          if (!roomId) return sendToClient(ws, "error", { message: "roomId required" });
+          if (SIGNALING_SECRET && msg.secret !== SIGNALING_SECRET) {
+            return sendToClient(ws, "error", { message: "invalid secret" });
+          }
+
+          // Leave existing room if any
+          cleanupClient(client.id, client.roomId);
+
+          // Join new room
+          if (!rooms.has(roomId)) rooms.set(roomId, new Set());
+          rooms.get(roomId).add(client.id);
+          client.roomId = roomId;
+
+          console.log(`📡 [${client.isUnity ? "Unity" : "Web"}] ${client.id} joined room ${roomId}`);
+
+          // Notify others + reply
+          broadcast(client.id, roomId, "peer-joined", { socketId: client.id });
+          const existingPeers = Array.from(rooms.get(roomId)).filter(id => id !== client.id);
+          sendToClient(ws, "joined", { roomId, participants: existingPeers });
+          break;
+        }
+
+        case "offer":
+        case "answer":
+        case "ice-candidate": {
+          if (!client.roomId) return;
+          broadcast(client.id, client.roomId, eventType, payload, toSocketId);
+          break;
+        }
+
+        case "leave": {
+          cleanupClient(client.id, client.roomId);
+          client.roomId = null;
+          break;
+        }
+
+        default:
+          console.warn(`[WS] Unknown event '${eventType}' from ${client.id}`);
       }
-
-      socket.join(roomId);
-      joinRoom(roomId, socket.id);
-      console.log(`🟢 socket ${socket.id} joined room ${roomId}`);
-
-      socket.to(roomId).emit("peer-joined", { socketId: socket.id });
-      const participants = Array.from(rooms.get(roomId) || []).filter(id => id !== socket.id);
-      socket.emit("joined", { roomId, participants });
     } catch (err) {
-      console.error('join error', err);
-      socket.emit("error", { message: "join failed" });
+      console.error("[WS] Error parsing message:", err.message);
     }
   });
 
-  socket.on("offer", ({ roomId, sdp, toSocketId }) => {
-    if (!roomId || !sdp) return;
-    if (toSocketId) io.to(toSocketId).emit("offer", { from: socket.id, sdp });
-    else socket.to(roomId).emit("offer", { from: socket.id, sdp });
+  ws.on("close", () => {
+    const info = clients.get(ws);
+    if (!info) return;
+    cleanupClient(info.id, info.roomId);
+    clients.delete(ws);
+    console.log(`🔴 Disconnected: ${info.id} (${info.isUnity ? "Unity" : "Web"})`);
   });
 
-  socket.on("answer", ({ roomId, sdp, toSocketId }) => {
-    if (!roomId || !sdp) return;
-    if (toSocketId) io.to(toSocketId).emit("answer", { from: socket.id, sdp });
-    else socket.to(roomId).emit("answer", { from: socket.id, sdp });
-  });
-
-  socket.on("ice-candidate", ({ roomId, candidate, toSocketId }) => {
-    if (!roomId || !candidate) return;
-    if (toSocketId) io.to(toSocketId).emit("ice-candidate", { from: socket.id, candidate });
-    else socket.to(roomId).emit("ice-candidate", { from: socket.id, candidate });
-  });
-
-  socket.on("leave", ({ roomId }) => {
-    if (roomId) {
-      leaveRoom(roomId, socket.id);
-      socket.leave(roomId);
-      socket.to(roomId).emit("peer-left", { socketId: socket.id });
-    }
-  });
-
-  socket.on("disconnect", (reason) => {
-    console.log("🔌 socket disconnected", socket.id, reason);
-    for (const [roomId, set] of rooms.entries()) {
-      if (set.has(socket.id)) {
-        leaveRoom(roomId, socket.id);
-        socket.to(roomId).emit("peer-left", { socketId: socket.id });
-      }
-    }
-  });
-
-  socket.on("error", (err) => {
-    console.error("⚠️ socket error", err);
-  });
+  ws.on("error", (err) => console.error("[WS] Error:", err.message));
 });
 
-const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-  console.log(`🚀 Signaling server listening on port ${PORT}`);
+  console.log(`🚀 [Signaling] Server ready on ws://localhost:${PORT}`);
 });
+
 
 
 /*

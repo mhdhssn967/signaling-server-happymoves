@@ -189,13 +189,36 @@ wss.on("connection", (ws, req) => {
           break;
         }
 
+        // --- 🔧 FIXED SECTION STARTS HERE ---
         case "offer":
         case "answer":
         case "ice-candidate": {
           if (!client.roomId) return;
-          broadcast(client.id, client.roomId, eventType, payload, toSocketId);
+
+          let finalPayload = payload;
+
+          // Normalize Unity ICE candidate structure
+          if (eventType === "ice-candidate") {
+            const candidateObj =
+              msg.payload?.candidate?.candidate || msg.payload?.candidate;
+            const sdpMid =
+              msg.payload?.candidate?.sdpMid || msg.payload?.sdpMid;
+            const sdpMLineIndex =
+              msg.payload?.candidate?.sdpMLineIndex || msg.payload?.sdpMLineIndex;
+
+            if (candidateObj) {
+              finalPayload = {
+                candidate: candidateObj,
+                sdpMid,
+                sdpMLineIndex,
+              };
+            }
+          }
+
+          broadcast(client.id, client.roomId, eventType, finalPayload, toSocketId);
           break;
         }
+        // --- 🔧 FIXED SECTION ENDS HERE ---
 
         case "leave": {
           cleanupClient(client.id, client.roomId);
@@ -224,7 +247,8 @@ wss.on("connection", (ws, req) => {
 
 server.listen(PORT, () => {
   console.log(`🚀 [Signaling] Server ready on ws://localhost:${PORT}`);
-}); 
+});
+
 
 
 /*

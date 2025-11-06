@@ -81,6 +81,7 @@ const PORT = process.env.PORT || 8080;
 
 const app = express();
 
+// --- CORS Config ---
 const allowedOrigins = [
   "https://oqulix.com",
   "https://ws-receiver-96na.vercel.app",
@@ -89,47 +90,57 @@ const allowedOrigins = [
   "http://127.0.0.1:5501",
 ];
 
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin) || origin.endsWith("netlify.app")) {
-      callback(null, true);
-    } else {
-      console.warn(`❌ Blocked CORS request from: ${origin}`);
-      callback(new Error("Not allowed by CORS"));
-    }
-  },
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin) || origin.endsWith("netlify.app")) {
+        callback(null, true);
+      } else {
+        console.warn(`❌ Blocked CORS request from: ${origin}`);
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+  })
+);
 
-app.get("/", (req, res) => res.send("✅ WebRTC Signaling Server (Unity-compatible) is running."));
+app.get("/", (req, res) =>
+  res.send("✅ WebRTC Signaling Server (Unity-compatible) is running.")
+);
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const clients = new Map();
-const rooms = new Map();
+// --- In-memory tracking ---
+const clients = new Map(); // ws → { id, roomId, isUnity }
+const rooms = new Map(); // roomId → Set(socketIds)
 
+// --- Utility: send message to one client ---
 function sendToClient(ws, type, payload) {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify({ type, payload }));
   }
 }
 
+// --- Utility: broadcast message to room ---
 function broadcast(senderId, roomId, type, payload, toSocketId) {
   if (!rooms.has(roomId)) return;
-  wss.clients.forEach(ws => {
+  wss.clients.forEach((ws) => {
     const info = clients.get(ws);
     if (!info || info.roomId !== roomId || ws.readyState !== ws.OPEN) return;
 
     if (toSocketId) {
-      if (info.id === toSocketId) sendToClient(ws, type, { from: senderId, ...payload });
+      if (info.id === toSocketId)
+        sendToClient(ws, type, { from: senderId, ...payload });
     } else if (info.id !== senderId) {
       sendToClient(ws, type, { from: senderId, ...payload });
     }
   });
 }
 
+// --- Cleanup ---
 function cleanupClient(socketId, roomId) {
-  const targetRoom = roomId || Array.from(rooms.keys()).find(r => rooms.get(r).has(socketId));
+  const targetRoom =
+    roomId || Array.from(rooms.keys()).find((r) => rooms.get(r).has(socketId));
   if (!targetRoom || !rooms.has(targetRoom)) return;
 
   const peers = rooms.get(targetRoom);
@@ -140,14 +151,18 @@ function cleanupClient(socketId, roomId) {
   else rooms.delete(targetRoom);
 }
 
+// --- WebSocket Connections ---
 wss.on("connection", (ws, req) => {
-  const socketId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const socketId =
+    Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const userAgent = req.headers["user-agent"] || "";
   const isUnity = /unity|csharp|mono/i.test(userAgent);
 
   clients.set(ws, { id: socketId, roomId: null, isUnity });
 
-  console.log(`🟢 [${isUnity ? "Unity" : "Web"}] Connected: ${socketId} (${wss.clients.size} total)`);
+  console.log(
+    `🟢 [${isUnity ? "Unity" : "Web"}] Connected: ${socketId} (${wss.clients.size} total)`
+  );
 
   ws.on("message", (data) => {
     try {
@@ -155,69 +170,114 @@ wss.on("connection", (ws, req) => {
       const client = clients.get(ws);
       if (!msg.type) return;
 
-      // Normalize event type
-      const eventType = (msg.type === "ice") ? "ice-candidate" : msg.type;
+      // Normalize Unity naming
+      const eventType = msg.type === "ice" ? "ice-candidate" : msg.type;
 
-      // --- 🧠 FIX: Support Unity's structure ---
-      const roomId = msg.roomId || msg.to || msg.room;
-      const toSocketId = msg.toSocketId || null;
-      const payload = msg.payload || msg;
+      // Extract fields
+      const roomId = msg.roomId || msg.room || null;
+      const toSocketId = msg.toSocketId || msg.to || null;
+      const inner = msg.payload || msg.sdp || msg.candidate || {};
 
       switch (eventType) {
         case "join": {
-          if (!roomId) return sendToClient(ws, "error", { message: "roomId required" });
+          if (!roomId)
+            return sendToClient(ws, "error", { message: "roomId required" });
           if (SIGNALING_SECRET && msg.secret !== SIGNALING_SECRET) {
             return sendToClient(ws, "error", { message: "invalid secret" });
           }
 
+          // Leave existing
           cleanupClient(client.id, client.roomId);
+
+          // Join room
           if (!rooms.has(roomId)) rooms.set(roomId, new Set());
           rooms.get(roomId).add(client.id);
           client.roomId = roomId;
 
-          console.log(`📡 [${client.isUnity ? "Unity" : "Web"}] ${client.id} joined room ${roomId}`);
+          console.log(
+            `📡 [${client.isUnity ? "Unity" : "Web"}] ${client.id} joined room ${roomId}`
+          );
 
+          // Notify peers
           broadcast(client.id, roomId, "peer-joined", { socketId: client.id });
-          const existingPeers = Array.from(rooms.get(roomId)).filter(id => id !== client.id);
+          const existingPeers = Array.from(rooms.get(roomId)).filter(
+            (id) => id !== client.id
+          );
           sendToClient(ws, "joined", { roomId, participants: existingPeers });
           break;
         }
 
+        // --- Offer / Answer / ICE ---
         case "offer":
-case "answer":
-case "ice-candidate": {
-  // 🧠 Use client.roomId OR fallback to msg.to/msg.room
-  const targetRoom = client.roomId || msg.to || msg.room;
-  if (!targetRoom) {
-    console.warn(`[WS] ${eventType} missing roomId from ${client.id}`);
-    return;
-  }
+        case "answer":
+        case "ice-candidate": {
+          if (!client.roomId) return;
 
-  let finalPayload = payload;
+          let finalPayload = inner;
 
-  // Normalize Unity ICE payload
-  if (eventType === "ice-candidate") {
-    const candidateObj =
-      msg.payload?.candidate?.candidate || msg.payload?.candidate;
-    const sdpMid =
-      msg.payload?.candidate?.sdpMid || msg.payload?.sdpMid;
-    const sdpMLineIndex =
-      msg.payload?.candidate?.sdpMLineIndex || msg.payload?.sdpMLineIndex;
+          // ✅ FIX 1: Normalize Unity ICE message shape
+          if (eventType === "ice-candidate") {
+            const cand =
+              inner?.candidate?.candidate ||
+              inner?.candidate ||
+              inner?.payload?.candidate ||
+              inner;
 
-    if (candidateObj) {
-      finalPayload = { candidate: candidateObj, sdpMid, sdpMLineIndex };
-    }
-  }
+            const sdpMid =
+              inner?.candidate?.sdpMid ||
+              inner?.sdpMid ||
+              inner?.payload?.sdpMid ||
+              null;
 
-  broadcast(client.id, targetRoom, eventType, finalPayload, toSocketId);
-  break;
-}
+            const sdpMLineIndex =
+              inner?.candidate?.sdpMLineIndex ||
+              inner?.sdpMLineIndex ||
+              inner?.payload?.sdpMLineIndex ||
+              0;
 
+            if (cand) {
+              finalPayload = {
+                candidate: cand,
+                sdpMid,
+                sdpMLineIndex,
+              };
+            } else {
+              console.warn("⚠️ ICE payload missing candidate field", inner);
+              return;
+            }
+          }
 
-        case "leave":
+          // ✅ FIX 2: Ensure Unity offer/answer SDP is properly wrapped
+          if (eventType === "offer" || eventType === "answer") {
+            if (typeof inner === "string") {
+              finalPayload = { sdp: inner, type: eventType };
+            } else if (inner?.sdp) {
+              finalPayload = inner;
+            }
+          }
+
+          // Debug logging
+          if (eventType === "offer" || eventType === "answer") {
+            console.log(
+              `🔁 Forwarding ${eventType} from ${client.id} to ${
+                toSocketId || "room"
+              } (sdp length: ${
+                typeof finalPayload.sdp === "string"
+                  ? finalPayload.sdp.length
+                  : "none"
+              })`
+            );
+          }
+
+          broadcast(client.id, client.roomId, eventType, finalPayload, toSocketId);
+          break;
+        }
+
+        case "leave": {
           cleanupClient(client.id, client.roomId);
           client.roomId = null;
           break;
+        }
 
         default:
           console.warn(`[WS] Unknown event '${eventType}' from ${client.id}`);
@@ -241,6 +301,7 @@ case "ice-candidate": {
 server.listen(PORT, () => {
   console.log(`🚀 [Signaling] Server ready on ws://localhost:${PORT}`);
 });
+
 
 
 

@@ -90,25 +90,29 @@ const allowedOrigins = [
   "http://127.0.0.1:5501",
 ];
 
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin) || origin.endsWith("netlify.app")) {
-      callback(null, true);
-    } else {
-      console.warn(`❌ Blocked CORS request from: ${origin}`);
-      callback(new Error("Not allowed by CORS"));
-    }
-  },
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin) || origin.endsWith("netlify.app")) {
+        callback(null, true);
+      } else {
+        console.warn(`❌ Blocked CORS request from: ${origin}`);
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+  })
+);
 
-app.get("/", (req, res) => res.send("✅ WebRTC Signaling Server (Unity-compatible) is running."));
+app.get("/", (req, res) =>
+  res.send("✅ WebRTC Signaling Server (Unity-compatible) is running.")
+);
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 // --- In-memory tracking ---
 const clients = new Map(); // ws → { id, roomId, isUnity }
-const rooms = new Map();   // roomId → Set(socketIds)
+const rooms = new Map(); // roomId → Set(socketIds)
 
 // --- Utility: send message to one client ---
 function sendToClient(ws, type, payload) {
@@ -120,7 +124,7 @@ function sendToClient(ws, type, payload) {
 // --- Utility: broadcast message to room ---
 function broadcast(senderId, roomId, type, payload, toSocketId) {
   if (!rooms.has(roomId)) return;
-  wss.clients.forEach(ws => {
+  wss.clients.forEach((ws) => {
     const info = clients.get(ws);
     if (!info || info.roomId !== roomId || ws.readyState !== ws.OPEN) return;
 
@@ -134,7 +138,7 @@ function broadcast(senderId, roomId, type, payload, toSocketId) {
 
 // --- Cleanup ---
 function cleanupClient(socketId, roomId) {
-  const targetRoom = roomId || Array.from(rooms.keys()).find(r => rooms.get(r).has(socketId));
+  const targetRoom = roomId || Array.from(rooms.keys()).find((r) => rooms.get(r).has(socketId));
   if (!targetRoom || !rooms.has(targetRoom)) return;
 
   const peers = rooms.get(targetRoom);
@@ -161,18 +165,20 @@ wss.on("connection", (ws, req) => {
       const client = clients.get(ws);
       if (!msg.type) return;
 
-      // Normalize Unity event naming
-      const eventType = (msg.type === "ice") ? "ice-candidate" : msg.type;
-      const { roomId, toSocketId, ...payload } = msg;
+      // Map old/Unity-style names to consistent event keys
+      let eventType = msg.type;
+      if (eventType === "ice") eventType = "ice-candidate";
+
+      const { roomId, toSocketId, payload } = msg;
 
       switch (eventType) {
         case "join": {
-          if (!roomId) return sendToClient(ws, "error", { message: "roomId required" });
-          if (SIGNALING_SECRET && msg.secret !== SIGNALING_SECRET) {
+          if (!roomId)
+            return sendToClient(ws, "error", { message: "roomId required" });
+          if (SIGNALING_SECRET && msg.secret !== SIGNALING_SECRET)
             return sendToClient(ws, "error", { message: "invalid secret" });
-          }
 
-          // Leave existing room if any
+          // Leave previous room
           cleanupClient(client.id, client.roomId);
 
           // Join new room
@@ -182,18 +188,51 @@ wss.on("connection", (ws, req) => {
 
           console.log(`📡 [${client.isUnity ? "Unity" : "Web"}] ${client.id} joined room ${roomId}`);
 
-          // Notify others + reply
+          // Notify others and reply
           broadcast(client.id, roomId, "peer-joined", { socketId: client.id });
-          const existingPeers = Array.from(rooms.get(roomId)).filter(id => id !== client.id);
+          const existingPeers = Array.from(rooms.get(roomId)).filter((id) => id !== client.id);
           sendToClient(ws, "joined", { roomId, participants: existingPeers });
           break;
         }
 
         case "offer":
-        case "answer":
-        case "ice-candidate": {
+        case "answer": {
           if (!client.roomId) return;
           broadcast(client.id, client.roomId, eventType, payload, toSocketId);
+          break;
+        }
+
+        case "ice-candidate": {
+          if (!client.roomId) return;
+
+          // Normalize ICE payload for Unity or browser
+          let icePayload = payload;
+          if (icePayload) {
+            // Case 1: Unity flat structure
+            if (
+              typeof icePayload.candidate === "string" &&
+              (!icePayload.sdpMLineIndex || typeof icePayload.sdpMLineIndex !== "number")
+            ) {
+              icePayload = {
+                candidate: {
+                  candidate: icePayload.candidate,
+                  sdpMid: icePayload.sdpMid || null,
+                  sdpMLineIndex: 0,
+                },
+              };
+            }
+            // Case 2: Browser correct structure
+            else if (
+              typeof icePayload.candidate === "object" &&
+              icePayload.candidate.candidate
+            ) {
+              // OK
+            } else {
+              console.warn("⚠️ Unknown ICE payload shape:", icePayload);
+            }
+          }
+
+          broadcast(client.id, client.roomId, "ice-candidate", icePayload, toSocketId);
           break;
         }
 
@@ -225,6 +264,7 @@ wss.on("connection", (ws, req) => {
 server.listen(PORT, () => {
   console.log(`🚀 [Signaling] Server ready on ws://localhost:${PORT}`);
 });
+
 
 
 

@@ -1,10 +1,7 @@
-#!/usr/bin/env node
-
 const express = require('express')
 const cors = require('cors')
 const { WebSocketServer } = require('ws')
 const net = require('net')
-// const { monitorTransactions } = require('./public/webrtc-client');
 
 const app = express()
 
@@ -19,84 +16,97 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.static('public')); // Serve static files
 
-// WebSocket bridge (same as before)
+// --- WebSocket Bridge ---
 const wss = new WebSocketServer({ port: 8080 });
-const unityHost = '192.168.1.42';
-const unityPort = 8888;
 
-wss.on('connection', function connection(ws) {
-  console.log('Browser connected');
-  
-  const unitySocket = new net.Socket();
-  unitySocket.connect(unityPort, unityHost, () => {
-    console.log('Connected to Unity server');
-    ws.send(JSON.stringify({ type: 'status', data: 'Connected to Unity' }));
-  });
-
-  // Forward messages from browser to Unity
-  ws.on('message', (data) => {
-    console.log('Browser -> Unity:', data.toString());
-    unitySocket.write(data + '\n');
-  });
-
-// Store message buffers for Unity connections
+// Keep message buffers here
 const unityMessageBuffers = new Map();
 
-// Forward messages from Unity to browser
-unitySocket.on('data', (data) => {
-    try {
-        // Append new data to buffer for this Unity connection
-        if (!unityMessageBuffers.has(unitySocket)) {
-            unityMessageBuffers.set(unitySocket, '');
+wss.on('connection', (ws) => {
+    console.log("Browser connected");
+
+    let unitySocket = null;
+    let unityHost = null;
+    let unityPort = null;
+
+    ws.on("message", (raw) => {
+        let msgString = raw.toString();
+
+        let parsed;
+        try {
+            parsed = JSON.parse(msgString);
+        } catch {
+            // Non-JSON message → forward to Unity
+            if (unitySocket) unitySocket.write(msgString + "\n");
+            return;
         }
-        let messageBuffer = unityMessageBuffers.get(unitySocket);
-        messageBuffer += data.toString();
-        
-        // Process complete messages (delimited by newlines)
-        let accumulatedData = messageBuffer; // Use let instead of const
-        let newlineIndex;
-        
-        while ((newlineIndex = accumulatedData.indexOf('\n')) >= 0) {
-            const completeMessage = accumulatedData.substring(0, newlineIndex);
-            accumulatedData = accumulatedData.substring(newlineIndex + 1); // Update accumulatedData
-            
-            if (completeMessage && completeMessage.trim().length > 0) {
-                console.log('Unity -> Browser:');
-                
-                // Send clean JSON to browser
+
+        // === FIRST MESSAGE: CONFIG ===
+        if (parsed.type === "config") {
+            unityHost = parsed.unityHost;
+            unityPort = parsed.unityPort;
+
+            console.log("Unity Host set to:", unityHost, "Port:", unityPort);
+            ws.send(JSON.stringify({ type: "status", data: "Connecting..." }));
+
+            // Connect to Unity
+            unitySocket = new net.Socket();
+            unitySocket.connect(unityPort, unityHost, () => {
+                console.log("Connected to Unity server");
+                ws.send(JSON.stringify({ type: "status", data: "Connected to Unity" }));
+            });
+
+            // Handle Unity data
+            unitySocket.on("data", (data) => {
                 try {
-                    const parsedMessage = JSON.parse(completeMessage);
-                    ws.send(JSON.stringify(parsedMessage));
-                } catch (parseError) {
-                    console.error('Error parsing JSON from Unity:', parseError);
-                    // Send raw message if JSON parsing fails
-                    ws.send(completeMessage);
+                    let buffer = unityMessageBuffers.get(unitySocket) || "";
+                    buffer += data.toString();
+
+                    let newlineIndex;
+                    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+                        const completeMessage = buffer.substring(0, newlineIndex);
+                        buffer = buffer.substring(newlineIndex + 1);
+
+                        if (completeMessage.trim().length > 0) {
+                            try {
+                                const parsedMessage = JSON.parse(completeMessage);
+                                ws.send(JSON.stringify(parsedMessage));
+                            } catch {
+                                console.error("JSON parse error from Unity, sending raw");
+                                ws.send(completeMessage);
+                            }
+                        }
+                    }
+
+                    unityMessageBuffers.set(unitySocket, buffer);
+                } catch (error) {
+                    console.error("Error processing Unity data:", error);
                 }
-            }
+            });
+
+            unitySocket.on("close", () => {
+                console.log("Unity connection closed");
+                ws.close();
+            });
+
+            unitySocket.on("error", (err) => {
+                console.error("Unity connection error:", err);
+                ws.send(JSON.stringify({ type: "status", data: "Unity connection failed" }));
+            });
+
+            return; // End config section
         }
-        
-        // Update the buffer with remaining data
-        unityMessageBuffers.set(unitySocket, accumulatedData);
-        
-    } catch (error) {
-        console.error('Error processing Unity data:', error);
-    }
-});
 
-  unitySocket.on('close', () => {
-    console.log('Unity connection closed');
-    ws.close();
-  });
+        // Normal messages → forward to Unity
+        if (unitySocket) {
+            unitySocket.write(msgString + "\n");
+        }
+    });
 
-  unitySocket.on('error', (err) => {
-    console.error('Unity connection error:', err);
-    ws.close();
-  });
-
-  ws.on('close', () => {
-    console.log('Browser disconnected');
-    unitySocket.end();
-  });
+    ws.on("close", () => {
+        console.log("Browser disconnected");
+        if (unitySocket) unitySocket.end();
+    });
 });
 
 // Serve the HTML page

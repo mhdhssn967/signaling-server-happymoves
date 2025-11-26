@@ -7,7 +7,9 @@ const app = express()
 
 // CORS setup
 const corsOptions = {
-    origin: ['http://localhost:3000', 'http://localhost:3001'],
+    // NOTE: For Render, you might need to add your Render domain (e.g., 'https://your-service.onrender.com') 
+    // if the web client is hosted separately. Keep localhost for local testing.
+    origin: ['http://localhost:3000', 'http://localhost:3001'], 
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type'],
 };
@@ -16,8 +18,17 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.static('public')); // Serve static files
 
-// --- WebSocket Bridge ---
-const wss = new WebSocketServer({ port: 8080 });
+const PORT = process.env.PORT || 3000
+
+// 1. Start the HTTP server (Express) and store the instance
+const httpServer = app.listen(PORT, () => {
+    console.log(`Web/HTTP Server running on port ${PORT}`);
+    console.log(`WebSocket bridge running on the same port.`);
+});
+
+// 2. Attach the WebSocket Server to the existing HTTP server instance
+// This removes the need for a separate, inaccessible port (8080).
+const wss = new WebSocketServer({ server: httpServer });
 
 // Keep message buffers here
 const unityMessageBuffers = new Map();
@@ -106,16 +117,12 @@ wss.on('connection', (ws) => {
     ws.on("close", () => {
         console.log("Browser disconnected");
         if (unitySocket) unitySocket.end();
+        // Clean up buffer map
+        unityMessageBuffers.delete(unitySocket);
     });
 });
 
 // Serve the HTML page
 app.get("/", (req, res) => {
     res.sendFile(__dirname + '/public/index.html');
-});
-
-const PORT = process.env.PORT || 3000
-app.listen(PORT, () => {
-    console.log("WebRTC Server running on port " + PORT);
-    console.log("WebSocket bridge running on port 8080");
 });

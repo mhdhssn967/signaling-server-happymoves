@@ -124,5 +124,5 @@ wss.on('connection', (ws) => {
 
 // Serve the HTML page
 app.get("/", (req, res) => {
-    res.sendFile(__dirname + '/public/index.html');
+    res.sendFile(__dirname + './index.html');
 });

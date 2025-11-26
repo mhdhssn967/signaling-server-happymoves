@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC Unity Client</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .status { margin: 10px 0; padding: 10px; background: #f0f0f0; }
+        button { margin: 5px; padding: 10px; }
+        video { background: #000; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>WebRTC Client - Connected to Unity</h1>
+    
+    <div class="status">
+        <strong>Signaling Status:</strong> <span id="signalingStatus">Disconnected</span> | 
+        <strong>WebRTC Status:</strong> <span id="webrtcStatus">Not connected</span>
+    </div>
+
+    <div>
+        <button onclick="disconnect()">Disconnect</button>
+    </div>
+
+    <div>
+        <h3>Remote Video (From Unity)</h3>
+        <video id="remoteVideo" autoplay playsinline style="width: 400px; height: 300px;"></video>
+        <p id="statusMessage" style="color: #666;">Not connected</p>
+    </div>
+
+    <script src="/webrtc-client.js"></script>
+</body>
+</html>
